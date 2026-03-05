@@ -1,0 +1,20 @@
+[project]
+name = "async-hooks"
+version = "0.1.0"
+description = "WordPress-style async hooks/filters for Python — actions, filters, priority ordering, re-entrancy safety"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.backends"
