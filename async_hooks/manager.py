@@ -86,6 +86,7 @@ class AsyncHooks:
         callback: CallbackType,
         priority: int = 10,
         timeout_seconds: Optional[float] = None,
+        detach: bool = False,
     ) -> str:
         """Register an action callback.
 
