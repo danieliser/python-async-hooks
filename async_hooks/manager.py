@@ -92,7 +92,8 @@ class AsyncHooks:
         self._filter_timeout = filter_timeout_seconds
 
         # Global wildcard hooks — fired for every event (issue #4)
-        self._global_hooks: dict[int, list[tuple[str, CallbackType]]] = defaultdict(list)
+        # Each entry: (callback_id, callback, namespace_or_None)
+        self._global_hooks: dict[int, list[tuple[str, CallbackType, Optional[str]]]] = defaultdict(list)
         self._global_nesting: int = 0
         self._removed_globals: set[str] = set()
 
@@ -616,7 +617,12 @@ class AsyncHooks:
 
     # ─ Global Wildcard Hooks ─────────────────────────────────────────────
 
-    def subscribe_all(self, callback: CallbackType, priority: int = 90) -> str:
+    def subscribe_all(
+        self,
+        callback: CallbackType,
+        priority: int = 90,
+        namespace: Optional[str] = None,
+    ) -> str:
         """Register a handler that fires for every do_action() and apply_filters() call.
 
         The handler receives the event name as the first argument, followed by
@@ -631,6 +637,9 @@ class AsyncHooks:
             callback: Async or sync callable.
             priority: Execution order among global handlers. Default 90 (runs after
                       most domain-specific handlers at priority 10).
+            namespace: If given, only fires for hooks whose name equals the namespace
+                       or starts with "{namespace}.". For example, namespace="task"
+                       matches "task.created" and "task.completed" but not "config.changed".
 
         Returns:
             Unique callback_id for use with unsubscribe_all().
@@ -639,13 +648,18 @@ class AsyncHooks:
             raise ValueError("callback must be callable")
         if not isinstance(priority, int):
             raise ValueError("priority must be an integer")
+        if namespace is not None and (not namespace or not isinstance(namespace, str)):
+            raise ValueError("namespace must be a non-empty string")
 
         callback_id = str(uuid4())
-        self._global_hooks[priority].append((callback_id, callback))
+        self._global_hooks[priority].append((callback_id, callback, namespace))
         self._callback_registry[callback_id] = callback
         self._callback_types[callback_id] = "global"
 
-        logger.debug("subscribe_all priority=%d callback_id=%s", priority, callback_id)
+        logger.debug(
+            "subscribe_all priority=%d callback_id=%s namespace=%s",
+            priority, callback_id, namespace,
+        )
         return callback_id
 
     def unsubscribe_all(self, callback_id: str) -> bool:
@@ -673,9 +687,17 @@ class AsyncHooks:
 
     # ─ Introspection API ─────────────────────────────────────────────────
 
-    def registered_events(self) -> set[str]:
-        """Return the set of all hook names with at least one registered callback."""
-        return set(self._action_hooks.keys()) | set(self._filter_hooks.keys())
+    def registered_events(self, namespace: Optional[str] = None) -> set[str]:
+        """Return the set of all hook names with at least one registered callback.
+
+        Args:
+            namespace: If given, return only hooks matching this namespace prefix.
+                       "task" matches "task", "task.created", "task.lifecycle.start", etc.
+        """
+        events = set(self._action_hooks.keys()) | set(self._filter_hooks.keys())
+        if namespace is not None:
+            events = {h for h in events if self._hook_matches_namespace(h, namespace)}
+        return events
 
     def describe(self, hook_name: str) -> list[HandlerInfo]:
         """Return ordered descriptors for all callbacks registered on hook_name.
@@ -724,12 +746,46 @@ class AsyncHooks:
 
         return result
 
-    def describe_all(self) -> list[HandlerInfo]:
-        """Return descriptors for all callbacks across all hooks, sorted by hook name."""
+    def describe_all(self, namespace: Optional[str] = None) -> list[HandlerInfo]:
+        """Return descriptors for all callbacks across all hooks, sorted by hook name.
+
+        Args:
+            namespace: If given, limit to hooks matching this namespace prefix.
+        """
         result: list[HandlerInfo] = []
-        for hook_name in sorted(self.registered_events()):
+        for hook_name in sorted(self.registered_events(namespace=namespace)):
             result.extend(self.describe(hook_name))
         return result
+
+    def remove_namespace(self, namespace: str) -> int:
+        """Remove all action and filter callbacks on hooks matching a namespace prefix.
+
+        Removes callbacks from every hook whose name equals the namespace or starts
+        with "{namespace}.". For example, remove_namespace("task") clears
+        "task", "task.created", "task.lifecycle.start", etc.
+
+        If called while hooks in the namespace are executing, removals are deferred
+        (same as remove_all_actions/remove_all_filters).
+
+        Returns:
+            Number of distinct hook names cleared.
+        """
+        if not namespace or not isinstance(namespace, str):
+            raise ValueError("namespace must be a non-empty string")
+
+        matching = [
+            h for h in self.registered_events()
+            if self._hook_matches_namespace(h, namespace)
+        ]
+        for hook_name in matching:
+            self.remove_all_actions(hook_name)
+            self.remove_all_filters(hook_name)
+
+        logger.debug(
+            "remove_namespace namespace=%s cleared=%d hooks",
+            namespace, len(matching),
+        )
+        return len(matching)
 
     # ─ Typed Payload Validation ──────────────────────────────────────────
 
@@ -790,8 +846,10 @@ class AsyncHooks:
         self._global_nesting += 1
         try:
             for priority in sorted(self._global_hooks.keys()):
-                for callback_id, callback in list(self._global_hooks[priority]):
+                for callback_id, callback, ns in list(self._global_hooks[priority]):
                     if callback_id in self._removed_globals:
+                        continue
+                    if ns is not None and not self._hook_matches_namespace(hook_name, ns):
                         continue
                     try:
                         await self._run_action_listener(
@@ -822,7 +880,7 @@ class AsyncHooks:
         removed = False
         for priority, callbacks in list(self._global_hooks.items()):
             before = len(callbacks)
-            callbacks[:] = [(cid, cb) for cid, cb in callbacks if cid != callback_id]
+            callbacks[:] = [(cid, cb, ns) for cid, cb, ns in callbacks if cid != callback_id]
             if len(callbacks) != before:
                 removed = True
             if not callbacks:
@@ -849,6 +907,11 @@ class AsyncHooks:
         except Exception as exc:
             errors = exc.errors() if hasattr(exc, "errors") else [str(exc)]
             raise HookPayloadError(hook_name, schema, errors) from exc
+
+    @staticmethod
+    def _hook_matches_namespace(hook_name: str, namespace: str) -> bool:
+        """Return True if hook_name equals namespace or starts with '{namespace}.'."""
+        return hook_name == namespace or hook_name.startswith(f"{namespace}.")
 
     @staticmethod
     def _resolve_handler_name(callback: Callable) -> str:

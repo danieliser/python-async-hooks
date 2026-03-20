@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0] - 2026-03-20
+
+### Added
+
+- **Namespace support** — dot-delimited hook name prefixes are now a first-class concept.
+  - `subscribe_all(handler, namespace="task")` — scoped wildcard that only fires for hooks matching `"task"` or `"task.*"`. Multiple namespace subscriptions are independent; no partial-prefix false matches (`"taskrunner.start"` does not match `"task"`).
+  - `registered_events(namespace="task")` — filter the event catalog to a specific namespace.
+  - `describe_all(namespace="task")` — filter introspection results to a specific namespace.
+  - `remove_namespace("task")` — removes all action and filter callbacks on every hook matching the namespace prefix. Returns the number of distinct hooks cleared. Ideal for plugin teardown.
+
+### Backwards Compatible
+
+All changes are additive. `subscribe_all()` without `namespace` behaves identically to before.
+
+---
+
 ## [0.2.0] - 2026-03-20
 
 ### Added
